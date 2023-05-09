@@ -15,7 +15,7 @@ The data preparing code is located at `src/prepare_datasets.py`, you may run it 
 
 ```shell
 >>> cd src
->>> conda create -n PromptLM4CSR python=3.9 -y
+>>> conda create -n PromptLM4CSR python=3.9
 >>> conda activate PromptLM4CSR
 >>> sh setup.sh
 ```
