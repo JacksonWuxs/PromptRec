@@ -35,3 +35,5 @@ The data preparing code is located at `src/prepare_datasets.py`, you may run it 
 >>> python auto_report.py logs/zeroshot.log
 >>> cat logs/zeroshot_mean.tsv logs/zeroshot_std.tsv
 ```
+
+* Tips: You may download the .tsv files and open them with Excel for better visualization.
