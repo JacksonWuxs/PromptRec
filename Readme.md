@@ -1,3 +1,7 @@
+## Introduction
+This is the official impelementation (code & dataset) to our paper: [Towards Personalized Cold-Start Recommendation with Prompts](https://arxiv.org/abs/2306.17256). 
+This repo includes the first benchmark for the system cold-start recommendation problem and provides a prompt learning based baseline for this task.
+
 #### Benchmark
 
 We download the three datasets from their official websites and keep the same file at ``datasets/downstream_tasks`` for your convenience.  All datafiles have the same MD5 codes as the files you download from official websites by yourself.
