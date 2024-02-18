@@ -1,5 +1,5 @@
 #### Introduction
-This is the official impelementation (code & dataset) to our paper: [Towards Personalized Cold-Start Recommendation with Prompts](https://arxiv.org/abs/2306.17256). 
+This is the official implementation (code & dataset) to our paper: [Could Small Language Models Serve as Recommenders? Towards Data-centric Cold-start Recommendations](https://arxiv.org/abs/2306.17256). 
 This repo includes the first benchmark for the system cold-start recommendation problem and provides a prompt learning based baseline for this task.
 
 #### Benchmark
