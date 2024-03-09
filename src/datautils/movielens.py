@@ -36,7 +36,7 @@ class MovieLensMeta(BaseMeta):
                       Nominal("categories", lower_spliter),
                       Category("kid", "N/A", {"1": "for children"}),
                       )
-        BaseMeta.__init__(self, root, tokenizer, "\t", user_verbs, item_verbs, user_string, item_string, prefix, suffix, slots, 196, "title",
+        BaseMeta.__init__(self, root, tokenizer, "\t", user_verbs, item_verbs, user_string, item_string, prefix, suffix, slots, 256, "title",
                           task_id, domain_id, return_prof, return_vec, include_sep)
         self.keeps = ['age', 'gender', 'occupation', 'title', 'categories']
         self.drops = None

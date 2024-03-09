@@ -39,9 +39,9 @@ _Warning:_ If you want to run multiple random seeds simulatively, you need to _C
 * Experiments 2: PromptRec (Table 2)
 
 ```shell
->>> nohup sh run_promptrec.sh 0 > logs/zeroshot.log &
->>> python auto_report.py logs/zeroshot.log
->>> cat logs/zeroshot_mean.tsv logs/zeroshot_std.tsv
+>>> nohup sh run_promptrec.sh 0 > logs/promptrec.log &
+>>> python auto_report.py logs/promptrec.log
+>>> cat logs/promptrec_mean.tsv logs/promptrec_std.tsv
 ```
 
 * Experiments 3: Transferable prompt pre-training (Table 4)

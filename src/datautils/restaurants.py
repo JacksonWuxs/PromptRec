@@ -83,7 +83,7 @@ class RestaurantMeta(BaseMeta):
                       Simple("URL"),
                       Zipcode("area", "None")
                       )
-        BaseMeta.__init__(self, root, tokenizer, "\t", user_verbs, item_verbs, user_string, item_string, prefix, suffix, slots, 196, "name",
+        BaseMeta.__init__(self, root, tokenizer, "\t", user_verbs, item_verbs, user_string, item_string, prefix, suffix, slots, 256, "name",
                                                     task_id, domain_id, return_prof, return_vec, include_sep)
         self.keeps = None
         self.drops = ['URL', 'state', 'address', 'latitude', 'longitude', 'name']

@@ -29,23 +29,22 @@ class PLM(tc.nn.Module):
                       "s2s": trf.AutoModelForSeq2SeqLM,
                       "pretrain": trf.AutoModelForPreTraining,\
                       }.get(head, trf.AutoModel)
+        self.tokenizer = tokenizer if tokenizer else PLM.load_tokenizer(name)
         self.encoder = auto_model.from_pretrained(name)
         self.dim = self.encoder.config.hidden_size
-        self.tokenizer = tokenizer if tokenizer else PLM.load_tokenizer(name)
-        self.tokenizer.pad_token = self.tokenizer.eos_token = "<|endoftext|>"
-        self.padid = self.w2i(self.tokenizer.pad_token) if self.tokenizer.pad_token else 0
-        for names in [("pad", "eos"), ("cls", "bos"), ("sep", "eos"), ("mask",)]:
-            token = ""
-            for name in names:
-                if hasattr(self.tokenizer, name + "_token"):
-                    token = getattr(self.tokenizer, name + "_token")
-                    break
-            setattr(self, name + "_token", token)
+        special = self.tokenizer.eos_token if self.tokenizer.eos_token else self.tokenizer.mask_token
+        self.padid = self.tokenizer.pad_token_id if self.tokenizer.pad_token else  self.w2i(special)
+        if self.tokenizer.mask_token is None:
+            self.tokenizer.mask_token = special
+        for name in ["pad", "eos", "cls", "bos", "sep", "mask"]:
+            if getattr(self.tokenizer, name + "_token") is None:
+                setattr(self.tokenizer, name + "_token", ' ')
+            setattr(self, name + "_token", getattr(self.tokenizer, name + "_token"))
         self.to(self.device)
 
     @classmethod
     def load_tokenizer(cls, name):
-        return trf.AutoTokenizer.from_pretrained(name)
+        return trf.AutoTokenizer.from_pretrained(name, load_fast=False)
 
     def disable_training(self):
         self.eval()
@@ -92,6 +91,8 @@ class PLM(tc.nn.Module):
             masks = tc.where(ids != self.padid, 1.0, 0.0).to(dtype=tc.long,device=self.device, non_blocking=True)
         elif embs is not None:
             masks = tc.where(tc.sum(embs.abs(), -1) > 0, 1.0, 0.0).to(dtype=tc.long, device=self.device, non_blocking=True)
+        if "llama" in self._name:
+            return {"inputs_embeds": embs}
         if "t5" in self._name:
             decoder_ids, decoder_embs = None, None
             if ids is not None:
@@ -143,7 +144,8 @@ class PLM(tc.nn.Module):
             logits = outputs[0][index[:, 0], index[:, 1]].squeeze()
             
         elif self.head in ("clm", "s2s"):
-            logits = outputs[0][:, -1, :]
+            logits = outputs[0][index[:, 0], index[:, 1]].squeeze()
+            #logits = outputs[0][:, -1, :].squeeze()
         
         if return_logits:
             return logits

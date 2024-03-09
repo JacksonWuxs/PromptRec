@@ -53,7 +53,7 @@ class CouponsMeta(BaseMeta):
                       Category("distance", "", {"0": "very close", "1": "close", "2": "far", "3": "very far"}),
                       Category("direction", "", {"1": "same", "0": "opposite"}),
                       )
-        BaseMeta.__init__(self, root, tokenizer, "|", user_verbs, item_verbs, user_string, item_string, prefix, suffix, slots, 196, "coupon",
+        BaseMeta.__init__(self, root, tokenizer, "|", user_verbs, item_verbs, user_string, item_string, prefix, suffix, slots, 256, "coupon",
                           task_id, domain_id, return_prof, return_vec, include_sep)
         self.keeps = None
         self.drops = None
