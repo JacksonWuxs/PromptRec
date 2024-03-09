@@ -70,8 +70,8 @@ class CorpusSearchIndex:
 class PublicCorpus:
     def __init__(self, corpus, subset, key, start=0, stop=None, skip=1):
         from datasets import load_dataset
-        self.corpus = load_dataset(*corpus)[subset]
-        if stop is None or stop > len(self.corpus):
+        self.corpus = load_dataset(*corpus, streaming=True)[subset]
+        if stop is None:
             stop = len(self.corpus)
         assert isinstance(start, int) and isinstance(stop, int)
         self.start, self.stop, self.skip = start, stop, skip
@@ -81,8 +81,11 @@ class PublicCorpus:
         return len(self.corpus)
 
     def __iter__(self):
-        for idx in tqdm.tqdm(range(self.start, self.stop, self.skip)):
-            yield self.corpus[idx][self.key]
+        bar = tqdm.tqdm(total=(self.stop - self.start) // self.skip)
+        for idx, row in enumerate(self.corpus, 1):
+            if self.start <= idx <= self.stop and idx % self.skip == 0:
+                bar.update(1)
+                yield row[self.key]
 
     def localize(self, file_path, min_words=3, encoding="utf8", sep="\n"):
         init_folder(file_path)

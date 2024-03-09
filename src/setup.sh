@@ -4,7 +4,6 @@ pip install numpy==1.22.4
 pip install pandas==1.5.1
 pip install scikit_learn==1.2.1
 pip install scipy==1.10.0
-pip install tensorflow==2.11.0
 pip install torch==1.13.0
 pip install tqdm==4.64.1
 pip install transformers==4.23.1

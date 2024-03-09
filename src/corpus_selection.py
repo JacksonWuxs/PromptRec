@@ -13,6 +13,7 @@ from datasets import load_dataset
 from sentence_transformers import SentenceTransformer, CrossEncoder
 
 from models.plms import PLM
+from models.quick_LM_evaluate import LogProbComputer
 from datautils.core.corpus import PublicCorpus, CorpusSearchIndex
 from datautils.movielens import MovieLensMeta
 from datautils.coupons import CouponsMeta
@@ -99,7 +100,6 @@ class PairDocumentRetrival(BaseCorpus):
         self.model = SentenceTransformer("all-MiniLM-L6-v2", device="cuda")
         self.docs = documents
         self.cands = documents
-        print(list(documents)[:3])
         self.embs = self.encode(documents).T
         self.qry = None
 
@@ -223,17 +223,14 @@ def refine_corpus(plm, corpus, domain, corpus_maxlen=128, batchsize=1024):
 
 def selecting(src, tgt, topK=1.0, seg="\t"):
     src = CorpusSearchIndex(src)
-    def check(row):
-        x, y, z, _ = row.split(seg, 3)
-        return float(y)
-    scores = sorted(enumerate(map(check, src)),
+    scores = sorted(enumerate(map(lambda x: float(x.split(seg, 3)[1]), src)),
                     reverse=True, key=lambda pair: pair[1])
     if isinstance(topK, float):
         topK = int(len(scores) * topK)
-    for tmp, (idx, val) in enumerate(scores, 1):
+    for temp, (idx, val) in enumerate(scores, 1):
         if val <= 1e-10:
             break
-    print(tmp, "warning!")
+    print(temp, "warning!")
     print(np.mean([_[1] for _ in scores]))
     print("10%", scores[int(0.1 * len(scores))][1])
     print("20%", scores[int(0.2 * len(scores))][1])
@@ -242,8 +239,8 @@ def selecting(src, tgt, topK=1.0, seg="\t"):
     with open(tgt, "w", encoding="utf8") as tgt:
         for _, (idx, score) in enumerate(scores, 1):
             single, pair, mutual, text = src[idx].split("\t", 3)
-            tgt.write(text + '\n')
             #tgt.write(single +'\t' + pair +'\t'+ mutual + '\t' + text + "\n")
+            tgt.write(text + "\n")
             current += 1
             if topK == current:
                 break
@@ -265,27 +262,17 @@ corpus = ["Adidas is one of the competitor of Nike.",
           "Gordon Ramsay is a British chef, restaurateur, television personality. He owned three Michellin restaurants world wide.",
           "AJLKJDSKLJFLSDJFIOUJKLJLKWJOIJKLDSJFLKSDJFKL dklfjlksdJ LKDSJF lj JFlkSJ Flkjoiwejf."
           ]
-root = r"../datasets/cond_final_refined_corpus/"
+root = r"../datasets/refined_corpus/"
 data = "../datasets/downstream_tasks/%s/"
 os.makedirs(root, exist_ok=True)
-save = root + "c4_%s_bertsmall_%sto%s_skip%s.txt"
-device = "cuda:2"
-plmname = "prajjwal1/bert-small"
-
+save = root + "c4_%s_%sto%s_skip%s.txt"
+device = "cuda:%s" % CUDA
 
 if __name__ == "__main__":
     tokenizer = PLM("prajjwal1/bert-small", "pretrain", device="cuda").tokenizer
-    from quick_LM_evaluate import LogProbComputer
     plm = LogProbComputer("gpt2")
-    #plm = PLM("prajjwal1/bert-small", "pretrain", device=device,)
-    #for doc in corpus:
-    #    print(doc)
-    #    doc = SingleDocumentMask(plm.tokenizer, doc, 256)
-    #    print(document_probability(plm, doc, 256, 64))
 
-    #for _ in refine_corpus(plm, corpus, domain):
-    #    print(_)
-        
+
     if sys.argv[3].count("-") == 2:
         dataname = sys.argv[4]
         suffix = "In short, the user feels [::MASK::] about the item."

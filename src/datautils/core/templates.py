@@ -36,16 +36,15 @@ class Template:
         self.configs = slot_args if slot_args else {}
         self.tokenizer = tokenizer
         self.maxlen = maxlen
-        self.sep_token = tokenizer.sep_token if hasattr(tokenizer, "sep_token") else tokenizer.eos_token
+        self.sep_token = tokenizer.sep_token if hasattr(tokenizer, "sep_token") and tokenizer.sep_token else tokenizer.eos_token
+        self.mask_token = tokenizer.mask_token
         if "[::MASK::]" in prompt:
-            if self.tokenizer.mask_token is None:
+            if self.mask_token is None:
                 prompt = prompt[:prompt.index("[::MASK::]")]
             else:
-                prompt = prompt.replace("[::MASK::]", self.tokenizer.mask_token)
+                prompt = prompt.replace("[::MASK::]", self.mask_token)
         self.blank = self._init_blank(prompt)
         self.slots, self.prompt = self._parse_prompt(prompt)
-        self.maxlen = maxlen
-        self.sep_token = tokenizer.sep_token if hasattr(tokenizer, "sep_token") else tokenizer.eos_token
 
     def _parse_prompt(self, prompt):            
         slots = []
@@ -87,9 +86,7 @@ class Template:
             if not word.isdigit() and\
                word not in prompt and\
                len(word) > 2 and \
-               word != self.sep_token and\
-               word[0] in {"[", "<"} and\
-               word[-1] in {"]", ">"}:
+               word != self.sep_token and (word[0] in {"[", "<"} and word[-1] in {"]", ">"}) or word == u"\u0104":
                 return word
         raise RuntimeError("Cannot find a free blank word.")
 
@@ -106,6 +103,9 @@ class Template:
             sample[position: position+1] = fill
             feature[position: position+1] = [slot.fid] * len(fill)
             shift += len(fill) - 1
+        if "MASK_LABEL" in kwrds and self.mask_token in sample:
+            idx = sample.index(self.mask_token)
+            sample[idx: idx+1] = self.tokenizer.tokenize(kwrds["MASK_LABEL"])
         return feature, sample 
 
     def construct(self, **kwrds):

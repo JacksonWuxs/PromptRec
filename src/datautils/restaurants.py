@@ -7,11 +7,7 @@ import transformers
 
 from .core.dataset import BaseMeta, BaseData
 from .core.templates import Template
-from .core.verbalizers import Nominal, Continue, Category, Simple, Zipcode
-
-
-def lower_spliter(text, seg="|"):
-    return " ".join(text.lower().replace("-", seg).replace("_", seg).split(seg))
+from .core.verbalizers import Nominal, Continue, Category, Simple, Zipcode, lower_spliter
 
 
 class RestaurantMeta(BaseMeta):
@@ -89,7 +85,8 @@ class RestaurantMeta(BaseMeta):
                       )
         BaseMeta.__init__(self, root, tokenizer, "\t", user_verbs, item_verbs, user_string, item_string, prefix, suffix, slots, 196, "name",
                                                     task_id, domain_id, return_prof, return_vec, include_sep)
-    
+        self.keeps = None
+        self.drops = ['URL', 'state', 'address', 'latitude', 'longitude', 'name']
 
 class RestaurantData(BaseData):
     def __init__(self, metaset, subset, sampling=None):

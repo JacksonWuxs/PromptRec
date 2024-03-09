@@ -1,8 +1,11 @@
 import os
+import random
 import itertools
+import functools
 
 import numpy as np
 import torch as tc
+import tqdm
 
 from .lookup import LookupTable
 from .corpus import CorpusSearchIndex
@@ -36,7 +39,7 @@ class _BaseType:
     def _get_feature(self, idx):
         assert isinstance(idx, int) and idx < len(self._names)
         features = self._meta[idx].split(self._segment)
-        assert len(features) == len(self._verbalizers)
+        #assert len(features) == len(self._verbalizers)
         return features
 
     def get_sample_index(self, instance_name):
@@ -64,7 +67,12 @@ class _BaseType:
             for fname, fval in self.get_features(idx).items():
                 if fval is not None:
                     counts[fname].add(fval)
-        return [{"name": verb.name, "continue": isinstance(verb, Continue), "length": len(counts[verb.name]), "side": self._category} \
+        return [{"name": verb.name,
+                 "continue": isinstance(verb, Continue),
+                 "choices": counts[verb.name],
+                 "length": len(counts[verb.name]),
+                 "miss": verb.miss,
+                 "side": self._category} \
                 for verb in self._verbalizers]
 
     def _verbalize(self, idx):
@@ -88,6 +96,7 @@ class BaseMeta:
         self.task, self.domain = task, domain
         cls = tokenizer.cls_token if tokenizer.cls_token else ""
         sep = tokenizer.sep_token if tokenizer.sep_token else ""
+        self._tokenizer = tokenizer
         
         pair_str = cls + prefix + user_str
         if include_sep is True:
@@ -118,13 +127,11 @@ class BaseMeta:
         return feed_dict
 
     def get_profiles(self, who="both"):
-        if who in ("both", "user"):
-            for idx in range(len(self.users)):
-                yield self.users.get_profile(idx, False)
-
-        if who in ("both", "item"):
-            for idx in range(len(self.items)):
-                yield self.items.get_profile(idx, False)
+        lists = ["users", "items"] if who == "both" else [who]
+        for _ in lists:
+            prof = getattr(self, _)
+            for idx in range(len(prof)):
+                yield prof.get_profile(idx, False)
 
     def get_keywords(self, tokenize_=str.split, topK=None):
         from sklearn.feature_extraction.text import TfidfVectorizer
@@ -155,8 +162,60 @@ class BaseMeta:
 
     def list_features(self):
         return self.users.list_features() + self.items.list_features()
+
+    def exhaustive_sampling(self, labels, keeps=None, drops=None):
+        """we exhaustive both users and items profiels"""
+        labels = [__ for _ in labels for __ in _]
+        names = [s.name for s in self.pair_temp.slots]
+        if keeps is not None:
+            names = [_ for _ in names if _ in keeps]
+        elif drops is not None:
+            names = [_ for _ in names if _ not in drops]
+        features = [f for f in self.list_features() if f["name"] in names]
+        choices = [f["choices"] | {f["miss"]} for f in features]
+        missing = [f["miss"] for f in features]
+        names = [f['name'] for f in features]
+        bar = tqdm.tqdm(total=functools.reduce(lambda x, y: x * y, map(len, choices)))
+        for sample in itertools.product(*choices):
+            sample = {n: v for n, v, m in zip(names, sample, missing)}
+            ids = self.pair_temp.construct(**(sample | {"MASK_LABEL": labels[0]}))[1]
+            text = self._tokenizer.decode(ids, skip_special_tokens=True)
+            for label in labels:
+                yield text.replace(labels[0], label)
+            bar.update(1)
+
+    def exhaustive_sampling(self, labels, fullsize=100000):
+        """we only exhaustive user profiles"""
+        labels = [__ for _ in labels for __ in _]
+        fullnames = {s.name for s in self.pair_temp.slots}
+        features = [f for f in self.users.list_features() if f["name"] in fullnames]
+        choices = [f["choices"] | {f["miss"]} for f in features]
+        missing = [f["miss"] for f in features]
+        names = [f['name'] for f in features]
+        user_size = functools.reduce(lambda x, y: x * y, map(len, choices))
+
+        unique_items = {}
+        for iid in range(len(self.items)):
+            item_features = {k: v for k, v in self.items.get_features(iid).items() if k in fullnames} 
+            tmp = (_[1] for _ in sorted(item_features.items(), key=lambda x: x[0]))
+            if tmp not in unique_items:
+                unique_items[tmp] = item_features | {"MASK_LABEL": labels[0]}
         
-        
+        bar = tqdm.tqdm(total=len(unique_items) * user_size)
+        sampling = fullsize / len(labels) / len(unique_items) / user_size
+        for item_features in unique_items.values():
+            for user_features in itertools.product(*choices):
+                bar.update(1)
+                if random.random() <= sampling * 1.01:
+                    try:
+                        sample = {n: v for n, v, m in zip(names, user_features, missing) if v != m} | item_features
+                        ids = self.pair_temp.construct(**sample)[1]
+                        text = self._tokenizer.decode(ids, skip_special_tokens=True)
+                        for label in labels:
+                            yield text.replace(labels[0], label)
+                    except AssertionError:
+                        pass
+                
 
 class BaseData(tc.utils.data.Dataset):
     def __init__(self, subset, metaset, split, threshold, sampling):

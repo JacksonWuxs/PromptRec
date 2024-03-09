@@ -8,22 +8,21 @@ import transformers
 
 from .core.dataset import BaseMeta, BaseData
 from .core.templates import Template
-from .core.verbalizers import Continue, Category, Simple, Functional
+from .core.verbalizers import Continue, Category, Simple, Occupation
 
 
 class CouponsMeta(BaseMeta):
     def __init__(self, root, tokenizer, prefix="", suffix="", task_id=0, domain_id=0, return_prof=True, return_vec=True, include_sep=False, include_mask=True):
-        user_string = "It is a {:temprature:} {:weather:} {:time:}. The driver is a {:salary:} and {:age:} {:gender:} driving {:destination:} {:passanger:}. "
-        item_string = "A {:coupon:} located in the {:direction_s:} {:direction_o:} driving direction sends a coupon that expires in {:expiration:}. "
+        user_string = "It is a {:temprature:} {:weather:} {:time:}. The {:occupation:} is a {:salary:} and {:age:} {:gender:} driving {:destination:} {:passanger:}. "
+        item_string = "A {:coupon:} located in the {:direction:} driving direction is {:distance:}, and sends a coupon that expires in {:expiration:}. "
         suffix = "The user is that driver, and the item is that coupon. " + suffix
         slots = {"age": {"fid": 0},
                       "gender": {"fid": 1},
                       "occupation": {"fid": 2},
                       "marry": {"fid": 3},
-                      "salary": {"fid": 4},
+                      "salary": {"fid": 4, "optional": False},
                       "passanger": {"optional": True},
-                 "direction_s": {"optional": True},
-                      "direction_o": {"optional": True}}
+                 }
 
         user_verbs = (Category("destination", "", {"No Urgent Place": "to somewhere", "Home": "home", "Work": "to the office"}),
                       Category("passanger", "", {"Friend(s)": "with friends", "Kid(s)": "with kids"}),
@@ -35,7 +34,7 @@ class CouponsMeta(BaseMeta):
                       Category("marry", "", {"Married partner": "has married", "Unmarried partner": "is unmarried", "Single": "is still single", "Divorced": "is divorced", "Widowed": "is widowed"}),
                       Category("has_child", "", {"1": "a child", "0": "no child"}),
                       Category("degree", "", {"Associates degree": "bachelor degree", "High School Graduate": "no degree", "Some High School": "no degree", "Some college - no degree": "no degree", "Bachelors degree": "batchelor degree", "Graduate degree (Masters or Doctorate)": "graduate degree"}),
-                      Functional("occupation", str.lower, ""),
+                      Occupation("occupation"),
                       Category("salary", "", {"Less than $12500": "low income", "$12500 - $24999": "low income", "$25000 - $37499": "low income", "$37500 - $49999": "low income",
                                               "$50000 - $62499": "moderate income", "$62500 - $74999": "moderate income", "$75000 - $87499": "moderate income",
                                               "$87500 - $99999": "high income", "$100000 or More": "high income"}))
@@ -51,15 +50,13 @@ class CouponsMeta(BaseMeta):
                       Simple("has_cafe"),
                       Simple("top_20"),
                       Simple("top_50"),
-                      Simple("unknow"),
-                      Simple("unknow"),
-                      Simple("unknow"),
-                      Category("direction_s", "", {"1": "same"}),
-                      Category("direction_o", "", {"1": "opposite"}),
+                      Category("distance", "", {"0": "very close", "1": "close", "2": "far", "3": "very far"}),
+                      Category("direction", "", {"1": "same", "0": "opposite"}),
                       )
         BaseMeta.__init__(self, root, tokenizer, "|", user_verbs, item_verbs, user_string, item_string, prefix, suffix, slots, 196, "coupon",
                           task_id, domain_id, return_prof, return_vec, include_sep)
-
+        self.keeps = None
+        self.drops = None
 
     
 

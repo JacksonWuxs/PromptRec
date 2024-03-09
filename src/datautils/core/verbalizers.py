@@ -3,6 +3,11 @@ import math
 
 import zipcodes
 
+
+def lower_spliter(text, seg="|"):
+    return " ".join(text.lower().replace("-", seg).replace("_", seg).split(seg))
+
+
 class Simple:
     def __init__(self, variable, missing=""):
         assert isinstance(variable, str)
@@ -57,7 +62,7 @@ class Category(Simple):
 
 
 class Nominal(Simple):
-    def __init__(self, variable, mapper, split="|", combine=(", ", "and"), missing=""):
+    def __init__(self, variable, mapper, split="|", combine=(", ", "and "), missing=""):
         assert isinstance(mapper, dict) or callable(mapper)
         assert isinstance(combine, tuple) and len(combine) == 2
         Simple.__init__(self, variable, missing)
@@ -75,6 +80,8 @@ class Nominal(Simple):
             return None
         if len(values) == 1:
             return values[0]
+        if len(values) == 2:
+            return values[0] + " " + self.lastcomb + values[-1]
         return self.precomb.join(values[:-1]) + self.precomb + self.lastcomb + values[-1]
 
 
@@ -114,13 +121,41 @@ class Zipcode(Simple):
 class Occupation(Simple):
     def __init__(self, name):
         Simple.__init__(self, name, "?")
+        self._maps = {'architecture & engineering': 'engineer',
+                    'transportation & material moving': 'technician',
+                    'construction & extraction': 'engineer',
+                    'community & social services': 'administrator',
+                    'protective service': 'police',
+                    'office & administrative support': 'administrator',
+                    'business & financial': 'executive',
+                    'sales & related': 'salesman',
+                    'installation maintenance & repair': 'technician',
+                    'management': 'administrator',
+                    'computer & mathematical': 'programmer',
+                    'food preparation & serving related': 'homemaker',
+                    'life physical social science': 'scientist',
+                    'personal care & service': 'healthcare',
+                    'unemployed': 'freelance',
+                    'building & grounds cleaning & maintenance': 'homemaker',
+                    'healthcare support': 'healthcare',
+                    'education&training&library': 'educator',
+                    'arts design entertainment sports & media': 'entertainment',
+                    'farming fishing & forestry': 'freelance',
+                    'legal': 'lawyer',
+                    'healthcare practitioners & technical': 'doctor',
+                    'production occupations': 'technician',
+                    "markting": "seller",
+                    "other": "freelance",
+                    "none": "freelance"
+                    }
+                       
 
     def _render(self, value):
-        if value in ("other", "none"):
-            return "freelance"
-        if value == "markting":
-            return "seller"
+        value = value.lower()
+        if value in self._maps:
+            return self._maps[value]
         return value
+    
 
 class MovieTitle(Simple):
     def __init__(self, name):
@@ -130,7 +165,8 @@ class MovieTitle(Simple):
         if title == "unknown":
             return title
         title, year = title[:-7], title[-5:-1]
-        if "," in title:
-            left, right = title.rsplit(",", 1)
-            title = right + " " + left
+        if title.endswith(", The"):
+            title = title[:-5]
+        if title.startswith("The"):
+            title = title[3:].strip()
         return title

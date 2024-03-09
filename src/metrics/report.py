@@ -55,7 +55,7 @@ class Report:
         
         titles = ["Group"] + sorted(set(columns) - set(groupby))
         indexs = [columns.index(t) for t in titles[1:]]
-        groups = {g: set(table[columns.index(g)]) for g in groupby}
+        groups = {g: set(table[columns.index(g)]) for g in groupby if g in columns}
             
 
         def get_subtable(table, groups):
@@ -74,7 +74,7 @@ class Report:
                         try:
                             row.append(agg(subtable[i]))
                         except Exception as e:
-                            row.append("Error")
+                            row.append(np.nan)
                     yield row
                     
                 else:
@@ -92,6 +92,7 @@ class Report:
             del table["_Summary"]
         if groupby[0] == "_Summary":
             del table["Group"]
+        table = table.dropna(axis=0, how="any")
         return table
 
     def parse_logfile(self, fpath, word=None):
@@ -99,24 +100,27 @@ class Report:
         if word is None:
             word = "\n" 
         with open(fpath) as logs:
-            for row in logs:
-                if word in row:
-                    result = {}
-                    for item in row.strip().split("\t"):
-                        if "=" in item:
-                            k, v = item.split("=", 1)
-                            if k in result:
-                                continue
-                            for func in [float, eval]:
-                                try:
-                                    v = func(v.strip())
-                                    break
-                                except:
-                                    pass 
-                            result[k.strip()] = v
-                        elif item.startswith("{") and item.endswith("}"):
-                            result.update(eval(item.replace("nan", "float('nan')")))
-                    self.append(result)
+            try:
+                for row in logs:
+                    if word in row:
+                        result = {}
+                        for item in row.strip().split("\t"):
+                            if "=" in item:
+                                k, v = item.split("=", 1)
+                                if k in result:
+                                    continue
+                                for func in [float, eval]:
+                                    try:
+                                        v = func(v.strip())
+                                        break
+                                    except:
+                                        pass 
+                                result[k.strip()] = v
+                            elif item.startswith("{") and item.endswith("}"):
+                                result.update(eval(item.replace("nan", "float('nan')")))
+                        self.append(result)
+            except:
+                pass
 
         
 
