@@ -1,313 +1,240 @@
-import re
 import os
-import sys
-import time
-import math
-import functools
-
-import nltk
-import torch as tc
+import tqdm
 import numpy as np
-from tqdm import tqdm
-from datasets import load_dataset
-from sentence_transformers import SentenceTransformer, CrossEncoder
+import torch as tc
+import transformers as trf
 
-from models.plms import PLM
-from datautils.core.corpus import PublicCorpus, CorpusSearchIndex
-from datautils.movielens import MovieLensMeta
-from datautils.coupons import CouponsMeta
-from datautils.restaurants import RestaurantMeta
+os.environ["TOKENIZERS_PARALLELISM"] = "false" 
+os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
 
-
-SEED = int(sys.argv[1])
-CUDA = str(sys.argv[2])
-os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-os.environ["CUDA_VISIBLE_DEVICES"] = CUDA 
-#tc.cuda.set_device(int(CUDA))
+def svd_flip(u, v):
+    # columns of u, rows of v
+    max_abs_cols = tc.argmax(tc.abs(u), 0)
+    i = tc.arange(u.shape[1]).to(u.device)
+    signs = tc.sign(u[max_abs_cols, i])
+    u *= signs
+    v *= signs.view(-1, 1)
+    return u, v
 
 
-class BaseCorpus:
-    def __init__(self, tokenizer, maxlen=510, num_worker=2):
-        self.plm = tokenizer
-        self.maxlen = maxlen
-        self.eos_id = tokenizer.convert_tokens_to_ids([tokenizer.cls_token])[0]
-        self.sep_id = tokenizer.convert_tokens_to_ids([tokenizer.sep_token])[0]
-        self.mask_id = tokenizer.convert_tokens_to_ids([tokenizer.mask_token])[0]
+class PLM(tc.nn.Module):
+    def __init__(self, name, head, tokenizer=None, device="cpu", load_in_8bit=False):
+        super(PLM, self).__init__()
+        assert head in ("mlm", "clm", "pretrain", "max", "mean", "pooler", "cls", "s2s")
+        self.device = device
+        self.head = head
+        self._name = name + head
+        auto_model = {"mlm": trf.AutoModelForMaskedLM,
+                      "clm": trf.AutoModelForCausalLM,
+                      "s2s": trf.AutoModelForSeq2SeqLM,
+                      "pretrain": trf.AutoModelForPreTraining,\
+                      }.get(head, trf.AutoModel)
+        self.encoder = auto_model.from_pretrained(name)
+        self.dim = self.encoder.config.hidden_size
+        self.tokenizer = tokenizer if tokenizer else PLM.load_tokenizer(name)
+        self.tokenizer.pad_token = self.tokenizer.eos_token = "<|endoftext|>"
+        self.padid = self.w2i(self.tokenizer.pad_token) if self.tokenizer.pad_token else 0
+        for names in [("pad", "eos"), ("cls", "bos"), ("sep", "eos"), ("mask",)]:
+            token = ""
+            for name in names:
+                if hasattr(self.tokenizer, name + "_token"):
+                    token = getattr(self.tokenizer, name + "_token")
+                    break
+            setattr(self, name + "_token", token)
+        self.to(self.device)
 
-    @property
-    def maxlen(self):
-        return self._maxlen
+    @classmethod
+    def load_tokenizer(cls, name):
+        return trf.AutoTokenizer.from_pretrained(name)
 
-    @maxlen.setter
-    def maxlen(self, newlen):
-        assert isinstance(newlen, int)
-        self._maxlen = newlen
-        self._halflen = newlen // 2
+    def disable_training(self):
+        self.eval()
+        for param in self.encoder.parameters():
+            param.requires_grad = False
+            param.requires_grad_(False)
 
-    def __iter__(self):
-        for idx in range(len(self)):
-            yield self[idx]        
+    def w2i(self, tokens):
+        if len(tokens) == 0:
+            return []
+        if isinstance(tokens, str):
+            return self.w2i([tokens])[0]
+        if not isinstance(tokens[0], str):
+            return [self.w2i(_) for _ in tokens]
+        return self.tokenizer.convert_tokens_to_ids(tokens)
 
-    def _prepare_document(self, doc):
-        assert doc is None or isinstance(doc, (list, tuple, str))
-        if doc is None:
-            return None
-        
-        if isinstance(doc, str):
-            return self.plm.convert_tokens_to_ids(self.plm.tokenize(doc))
-        
-        assert all(map(lambda x: isinstance(x, (int, str)), doc))
-        if isinstance(doc, str):
-            return self.plm.convert_tokens_to_ids(doc)
-        return doc
+    def i2w(self, ids):
+        if len(ids) == 0:
+            return []
+        if not isinstance(ids[0], int):
+            return [self.i2w(_) for _ in ids]
+        return self.tokenizer.convert_ids_to_tokens(ids)
 
-    def get_batches(self, bs, device="cpu"):
-        tensor = functools.partial(tc.tensor, device=device)
-        batch = []
-        for sample in self:
-            batch.append(sample)
-            if len(batch) == bs:
-                yield tuple(map(tensor, zip(*batch)))
-                batch.clear()
-        if len(batch) > 0:
-            yield tuple(map(tensor, zip(*batch)))
+    def tokenize(self, text):
+        return self.tokenizer.tokenize(text)
 
+    def prepare4generate(self, texts):
+        inputs = self.tokenizer(texts, padding=True, return_tensors="pt")
+        batch_size, seq_len = inputs["input_ids"].shape
+        inputs["attention_mask"] = tc.flip(inputs["attention_mask"], dims=[1])
+        shifts = seq_len - inputs["attention_mask"].sum(dim=-1)
+        for idx in range(batch_size):
+            inputs["input_ids"][idx] = inputs["input_ids"][idx].roll(shifts[idx].item())
+        return {k: v.to(self.device) for k, v in inputs.items()}
 
-class SingleDocumentMask(BaseCorpus):
-    def __init__(self, tokenizer, doc, maxlen=510):
-        if isinstance(doc, str):
-            doc = tokenizer.convert_tokens_to_ids(tokenizer.tokenize(doc))
-        self.doc = tokenizer.decode(doc)
-        self.ids = self._prepare_document(doc)
-        BaseCorpus.__init__(self, tokenizer, min(maxlen, len(self.ids)))
-        self.masks = [1] * (self._maxlen + 2)
+    def _prepare(self, ids, embs, segs, masks):
+        if ids is not None and ids.device != self.device:
+            ids = ids.to(dtype=tc.long, device=self.device, non_blocking=True)
+        if embs is not None and embs.device != self.device:
+            embs = embs.to(dtype=tc.float32, device=self.device, non_blocking=True)
+        if masks is not None and masks.device != self.device:
+            masks = masks.to(dtype=tc.long, device=self.device, non_blocking=True)
+        elif ids is not None:
+            masks = tc.where(ids != self.padid, 1.0, 0.0).to(dtype=tc.long,device=self.device, non_blocking=True)
+        elif embs is not None:
+            masks = tc.where(tc.sum(embs.abs(), -1) > 0, 1.0, 0.0).to(dtype=tc.long, device=self.device, non_blocking=True)
+        if "t5" in self._name:
+            decoder_ids, decoder_embs = None, None
+            if ids is not None:
+                decoder_ids = self.encoder._shift_right(ids)
+            if embs is not None:
+                decoder_embs = embs.new_zeros(embs.shape)
+                decoder_embs[:, 1:] = embs[:, :-1].clone()
+                decoder_embs[:, 0] = self.encoder.get_input_embeddings()(tc.LongTensor([self.encoder.config.decoder_start_token_id]).to(self.device))
+            return {"input_ids": ids,
+                    "decoder_input_ids": decoder_ids, 
+                    "inputs_embeds": embs, 
+                    "decoder_inputs_embeds": decoder_embs,
+                    "attention_mask": masks}
+        if "dis" in self._name:
+            return {"inputs_embeds": embs,
+                    "attention_mask": masks}
+        if segs is not None and segs.device != self.device:
+            segs = segs.to(dtype=tc.long, device=self.device, non_blocking=True)
+        return {"input_ids": ids,
+                "inputs_embeds": embs,
+                "token_type_ids": segs,
+                "attention_mask": masks}
 
-    def __len__(self):
-        return len(self.ids)
+    def _postprocess(self, inputs, outputs, index, return_logits):
+        if self.head == "pretrain":
+            return outputs
 
-    def __getitem__(self, idx):
-        word = self.ids[idx]
-        self.ids[idx] = self.mask_id
-        ids = [self.eos_id] + self.ids.copy() + [self.sep_id]
-        self.ids[idx] = word
-        return ids, self.masks, idx + 1, word
+        if self.head == "pooler":
+            outputs = outputs[1]
+            if not isinstance(outputs, tc.Tensor):
+                raise RuntimeError("Current pretrain model doesn't support pooler")
+            return outputs
 
+        if self.head == "cls":
+            return outputs[0][:, 0, :]
 
-class PairDocumentRetrival(BaseCorpus):
-    def __init__(self, tokenizer, documents, maxlen=509):
-        BaseCorpus.__init__(self, tokenizer, maxlen)
-        self.model = SentenceTransformer("all-MiniLM-L6-v2", device="cuda")
-        self.docs = documents
-        self.cands = documents
-        print(list(documents)[:3])
-        self.embs = self.encode(documents).T
-        self.qry = None
+        if self.head == "mean":
+            embs, mask = outputs[0], inputs["attention_mask"]
+            embs = embs * mask.unsqueeze(-1)
+            return tc.sum(embs, 1) / (mask.sum(1, keepdim=True) + 1e-9)
 
-    @property
-    def query(self):
-        return self.qry
+        if self.head == "max":
+            return tc.max(outputs[0], 1).values
 
-    @query.setter
-    def query(self, new_query):
-        self.qry = self._prepare_document(new_query)
-
-    def encode(self, texts):
-        if not isinstance(texts, list):
-            texts = list(texts)
-        return self.model.encode(texts, device="cuda", convert_to_tensor=True, normalize_embeddings=False)
-        return tc.nn.functional.normalize(embeds, axis=-1)
-
-    def remove_duplicates(self):
-        cand_hash, new_cands = set(), []
-        for cand in self.cands:
-            if cand not in cand_hash:
-                cand_hash.add(cand)
-                new_cands.append(cand)
-        self.cands = new_cands
-
-    def estimate_threshold(self, size=5000):
-        def nonzero_mean(x):
-            total = x.sum()
-            nonzero = x.nonzero().shape[0]
-            return total / nonzero
-        dataset = load_dataset("sedthh/gutenberg_english", "train")["train"].shuffle()
-        dataset = self.encode([x["TEXT"][:1000] for i, x in enumerate(dataset) if i <= size])
-        self.unmatch = nonzero_mean(tc.tril(dataset @ self.embs)).item()
-        self.matched = nonzero_mean(tc.tril(self.embs.T @ self.embs, diagonal=-1)).item()
-        self.ranged = self.matched - self.unmatch
-        self.threshold = ((self.unmatch + self.matched) / 2)
-        print("Estimated threshold: %.4f" % self.threshold, self.unmatch, self.matched)
-
-    def predict(self, query):
-        query = self.encode([query])
-        similar = (query @ self.embs).squeeze() 
-        logit = 4 * ((similar - self.unmatch) / self.ranged) - 2.0
-        return 1. / (1. + tc.exp(-logit))
-
-    def pretokenize(self):
-        self.cands = [self.plm.convert_tokens_to_ids(self.plm.tokenize(_)) for _ in self.cands]
-
-    def cand_length(self, percent=1.0):
-        assert isinstance(percent, float) and 0 < percent <= 1.0
-        return sorted(map(len, self.cands))[max(0, min(len(self.cands) - 1, int(len(self.cands) * percent)))]
-
-    def __len__(self):
-        return len(self.cands)
-
-    def __getitem__(self, idx):
-        query, candidate = self.qry, self.cands[idx]
-        if len(query) + len(candidate) > self._maxlen:
-            query = self.qry[:self._maxlen - len(candidate)]
-        ids = [self.eos_id] + query + [self.sep_id] + candidate + [self.sep_id]
-        padding = [0] * (3 + self._maxlen - len(ids))
-        return (ids + padding,
-                [1] * len(ids) + padding, # masks
-                [0] * (2 + len(query)) + [1] * (1 + len(candidate)) + padding) # segs
-
-    def _truncate_pair(self, seq_a, seq_b):
-        while len(seq_a) + len(seq_b) > self._maxlen:
-            if len(seq_a) > len(seq_b):
-                seq_a.pop()
-            else:
-                seq_b.pop()
-
-
-def document_probability(plm, document, seqlen, bs=32):
-    probas = []
-    for ids, masks, segs, pos, wid in document.get_batches(bs, plm.device):
-        proba = tc.softmax(plm(ids=ids, masks=masks, segs=segs)[0], -1)
-        probas.append(proba[tc.arange(len(proba)), pos.long(), wid.long()])
-    return 2 ** tc.log2(tc.cat(probas)).mean()
-
-
-def pairwise_probability(plm, query, candidates, bs=32):
-    return candidates.predict(query).float()
-
-def mutual_info(plm, query, candidates, bs):
-    pair_probas = candidates.predict(query).float()
-    if pair_probas.mean().item() <= 0.5:
-        return pair_probas.mean().item(), 0.0, -1e20
-    cond_probas = plm.score(query, 256, sampling=4)
-    mi = (pair_probas[:len(cond_probas)].cpu() * cond_probas.cpu()).sum()
-    return pair_probas.mean().item(), cond_probas.mean().item(), mi.item()
-
-
-def refine_corpus(plm, corpus, domain, corpus_maxlen=128, batchsize=1024):
-    tokenizer = plm.tokenizer
-    plm.prepare_documents(domain)
-    if not isinstance(domain, PairDocumentRetrival):
-        domain = PairDocumentRetrival(tokenizer, domain, 510)
-    domain.remove_duplicates()
-    domain.pretokenize()
-    domain.estimate_threshold()
-    domain_maxlen = domain.cand_length(1.0)
-
-    splitter = re.compile(r'(?<=[.!?:])\s+') 
-    with tc.no_grad():
-        plm.bfloat16()
-        #plm.disable_training()
-        for document in corpus:
-            # Rule-0: each document must be long enough
-            if len(document) <= 200:
-                continue
-            if len(set(document.split(" "))) <= 30:
-                continue
-            # Rule-1: each sentence must has at least 10 characters
-            sentences = [_ for _ in splitter.split(document, 10) if len(_) > 10]
-            if len(sentences) <= 2:
-                continue
-            heads =  " ".join(" ".join(sentences[:8]).split(" ")[:corpus_maxlen])
-            pair, single, score = mutual_info(plm, heads, domain, batchsize)
-            yield (single, pair, score, document.replace("\n", " "))
-
-
-def selecting(src, tgt, topK=1.0, seg="\t"):
-    src = CorpusSearchIndex(src)
-    def check(row):
-        x, y, z, _ = row.split(seg, 3)
-        return float(y)
-    scores = sorted(enumerate(map(check, src)),
-                    reverse=True, key=lambda pair: pair[1])
-    if isinstance(topK, float):
-        topK = int(len(scores) * topK)
-    for tmp, (idx, val) in enumerate(scores, 1):
-        if val <= 1e-10:
-            break
-    print(tmp, "warning!")
-    print(np.mean([_[1] for _ in scores]))
-    print("10%", scores[int(0.1 * len(scores))][1])
-    print("20%", scores[int(0.2 * len(scores))][1])
-    print("50%", scores[int(0.5 * len(scores))][1])
-    current = 0
-    with open(tgt, "w", encoding="utf8") as tgt:
-        for _, (idx, score) in enumerate(scores, 1):
-            single, pair, mutual, text = src[idx].split("\t", 3)
-            tgt.write(text + '\n')
-            #tgt.write(single +'\t' + pair +'\t'+ mutual + '\t' + text + "\n")
-            current += 1
-            if topK == current:
-                break
-    print("Totally collect %d documents by scaning %d." % (current, _)) 
+        if self.head == "mlm":
+            if index is None:
+                assert inputs["input_ids"] is not None
+                index = tc.nonzero(inputs["input_ids"] == self.tokenizer.mask_token_id, as_tuple=False).to(self.device)
+            logits = outputs[0][index[:, 0], index[:, 1]].squeeze()
             
+        elif self.head in ("clm", "s2s"):
+            logits = outputs[0][:, -1, :]
+        
+        if return_logits:
+            return logits
+        return tc.softmax(logits, -1)
 
-domain = ["Nike football shoes.",
-          "New Balance basketball shoes.",
-          "Lining trainer shoes.",
-          "middle aged female doctor living at New York.",
-          "young age male collage student living at New York."]    
-corpus = ["Adidas is one of the competitor of Nike.",
-          "Nike is a international company producing high quality sport equipments.",
-          "Air Jordan is a line of basketball shoes and athletic clothing produced by Nike.",
-          "New York is the most popular city in the United States.",
-          "Doctors generally wear comfortable sneakers.",
-          "The University of Georgia is a public land-grand research university in the southern american.",
-          "Gordon Ramsay is a British chef, restaurateur, and television personality. He owned three Michelin restaurants world wide.",
-          "Gordon Ramsay is a British chef, restaurateur, television personality. He owned three Michellin restaurants world wide.",
-          "AJLKJDSKLJFLSDJFIOUJKLJLKWJOIJKLDSJFLKSDJFKL dklfjlksdJ LKDSJF lj JFlkSJ Flkjoiwejf."
-          ]
-root = r"../datasets/cond_final_refined_corpus/"
-data = "../datasets/downstream_tasks/%s/"
-os.makedirs(root, exist_ok=True)
-save = root + "c4_%s_bertsmall_%sto%s_skip%s.txt"
-device = "cuda:2"
-plmname = "prajjwal1/bert-small"
+    def _encode(self, ids=None, embs=None, segs=None, masks=None, index=None, return_logits=True):
+        inputs = self._prepare(ids, embs, segs, masks)
+        mask = inputs["attention_mask"]
+        inputs["return_dict"] = True
+        if "bert" in self._name.lower():
+            embs = self.encoder(**inputs).last_hidden_state
+            return (embs * mask.unsqueeze(-1)).sum(axis=1) / (mask.sum(axis=1, keepdims=True) + 1e-7)
+        elif "t5" in self._name.lower():
+            del inputs["decoder_input_ids"], inputs["decoder_inputs_embeds"]
+            embs = self.encoder.encoder(**inputs).last_hidden_state
+            return (embs * mask.unsqueeze(-1)).sum(axis=1) / (mask.sum(axis=1, keepdims=True) + 1e-7)
+        elif "gpt" in self._name.lower():
+            embs = self.encoder(**inputs).last_hidden_state
+            return (embs * mask.unsqueeze(-1)).sum(axis=1) / (mask.sum(axis=1, keepdims=True) + 1e-7)
+        raise NotImplementedError("Unknow model for encoding")
+        
+                
+    def forward(self, ids=None, embs=None, segs=None, masks=None, index=None, return_logits=True):
+        inputs = self._prepare(ids, embs, segs, masks)
+        outputs = self.encoder(**inputs)
+        return self._postprocess(inputs, outputs, index, return_logits)
 
+    def encode(self, texts, batchsize=64, maxlen=510, total=None, whiten=True):
+        cls = self.tokenizer.cls_token if self.tokenizer.cls_token else self.tokenizer.bos_token
+        sep = self.tokenizer.sep_token if self.tokenizer.sep_token else self.tokenizer.eos_token
+        if cls is None:
+            cls = ""
+        if sep is None:
+            sep = ""
+        if maxlen is None:
+            maxlen = self.tokenizer.model_max_length
+        if total:
+            bar = tqdm.tqdm(total=total // batchsize)
+        embs, batch = [], []
+        with tc.no_grad():
+            self.eval()
+            for ids in texts:
+                if isinstance(ids, str):
+                    ids = cls + " " + ids + " " + sep
+                    ids = self.w2i(self.tokenize(ids))
+                batch.append(ids[:maxlen])
+                if len(batch) == batchsize:
+                    batch_maxlen = max(map(len, batch))
+                    for sample in batch:
+                        sample.extend([self.padid] * (batch_maxlen - len(sample)))
+                    inputs = tc.tensor(batch, device=self.device).reshape((len(batch), -1)).long()
+                    embs.append(self._encode(inputs))
+                    batch.clear()
+                    if total:
+                        bar.update(1)
+            if len(batch) > 0:
+                batch_maxlen = max(map(len, batch))
+                for sample in batch:
+                    sample.extend([self.padid] * (batch_maxlen - len(sample)))
+                inputs = tc.tensor(batch, device=self.device)
+                embs.append(self._encode(inputs.reshape((len(batch), -1))))
+            if whiten:
+                return self._whitening(tc.cat(embs, axis=0).to(self.device))
+            return tc.cat(embs, axis=0)
+        
+    def _whitening(self, embs):
+        # PCA
+        mu = tc.mean(embs, dim=0, keepdim=True)
+        X = embs - mu
+        U, S, V = tc.svd(X)
+        U, Vt = svd_flip(U, V)
+        accumulate, sum_S = 0.0, sum(S.detach().cpu().tolist())
+        for idx, s in enumerate(S.detach().cpu().tolist(), 1):
+            accumulate += s / sum_S
+            if accumulate > 0.8:
+                break
+        X = tc.mm(X, Vt[:idx].T)
+        
+        # whitening
+        u, s, vt = tc.svd(tc.mm(X.T, X) / (X.shape[0] - 1.0))
+        W = tc.mm(u, tc.diag(1.0 / tc.sqrt(s)))
+        X = tc.mm(X, W)
+        return X
+
+    
+    
 
 if __name__ == "__main__":
-    tokenizer = PLM("prajjwal1/bert-small", "pretrain", device="cuda").tokenizer
-    from quick_LM_evaluate import LogProbComputer
-    plm = LogProbComputer("gpt2")
-    #plm = PLM("prajjwal1/bert-small", "pretrain", device=device,)
-    #for doc in corpus:
-    #    print(doc)
-    #    doc = SingleDocumentMask(plm.tokenizer, doc, 256)
-    #    print(document_probability(plm, doc, 256, 64))
-
-    #for _ in refine_corpus(plm, corpus, domain):
-    #    print(_)
-        
-    if sys.argv[3].count("-") == 2:
-        dataname = sys.argv[4]
-        suffix = "In short, the user feels [::MASK::] about the item."
-        MetaClass = {"coupon": CouponsMeta, "mexico_restaurant": RestaurantMeta, "ml-100k": MovieLensMeta}[dataname]
-        start, stop, skip = list(map(int, sys.argv[3].split("-")))
-        meta = MetaClass(data % dataname, tokenizer, suffix=suffix)
-        domain = set(meta.exhaustive_sampling([["negative"], ["positive"]], fullsize=len(meta.items) * 10))
-        print("Total Number of Domain Documents: %d" % len(domain))
-        corpus = save % (dataname, start, stop, skip)
-        with open(corpus, "a+", encoding="utf8") as fout:
-            idx = 0
-            fout.seek(0)
-            for idx, row in enumerate(fout):
-                pass
-            start = idx * skip + start
-            corpus = PublicCorpus(("c4", "en"), "train", "text", start, stop, skip)
-            for _ in refine_corpus(plm, corpus, domain):
-                fout.write("\t".join(map(str, _)) + "\n")
-    else:
-        src, topK = sys.argv[3], int(sys.argv[4])
-        folder, file = os.path.split(sys.argv[3])
-        tgt = folder + "/top%s_" % topK + file
-        selecting(src, tgt, topK)
+    sentences = ["this is a test case [MASK]", "this is the user case [MASK]"]
+    plm = PLM("gpt2", head=None)
+    ids = [plm.tokenizer.convert_tokens_to_ids(plm.tokenizer.tokenize(_)) for _ in sentences]
     
+    print(plm.encode(ids, total=2).shape)
 

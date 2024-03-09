@@ -32,8 +32,8 @@ class PairwiseContent(tc.nn.Module, BaseTrainer):
         self.to(self.device)
 
     def _init_embeds(self, meta, bs):
-        users = map(lambda pair: pair[1], meta.get_profiles("user"))
-        items = map(lambda pair: pair[1], meta.get_profiles("item"))
+        users = map(lambda pair: pair[1], meta.get_profiles("users"))
+        items = map(lambda pair: pair[1], meta.get_profiles("items"))
         context = self.plm.encode(itertools.chain(users, items), batchsize=bs, 
                                   total=len(meta.users)+len(meta.items))
         self.uemb = tc.nn.Embedding(len(meta.users), context.shape[-1],
